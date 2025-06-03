@@ -18,7 +18,6 @@ from google.auth.transport import requests as google_requests
 # 1) READ SECRETS / CONFIGURATION
 # ────────────────────────────────────────────────────────────────────
 
-# These values come from Streamlit Cloud's Secrets (Settings → Secrets)
 GOOGLE_CLIENT_ID     = st.secrets["client_id"]
 GOOGLE_CLIENT_SECRET = st.secrets["client_secret"]
 REDIRECT_URI         = st.secrets["redirect_uri"]
@@ -35,25 +34,23 @@ os.makedirs(USER_DB_FOLDER, exist_ok=True)
 
 def build_google_auth_url() -> str:
     """
-    Build Google’s OAuth2 URL for 'response_type=code'. 
-    When clicked, user sees Google consent screen; after they allow, 
-    Google redirects back with ?code=ABC... to our REDIRECT_URI.
+    Build Google's OAuth2 URL for 'response_type=code'.
+    Google will redirect back with '?code=XYZ' after consent.
     """
     params = {
         "client_id":     GOOGLE_CLIENT_ID,
         "redirect_uri":  REDIRECT_URI,
-        "response_type": "code",              # authorization‐code flow
+        "response_type": "code",            # authorization‐code flow
         "scope":         "openid email profile",
-        "access_type":   "offline",           # ask for refresh_token if you ever need it
-        "prompt":        "select_account",    # always prompt account selector
+        "access_type":   "offline",         # request a refresh_token if you need it
+        "prompt":        "select_account",  # force account chooser
     }
     return "https://accounts.google.com/o/oauth2/v2/auth?" + urlencode(params)
 
 
 def exchange_code_for_token(code: str) -> dict:
     """
-    Given the 'code' from Google, exchange it for a JSON containing
-    access_token, id_token, refresh_token, etc.
+    Exchange the 'code' we got from Google for an 'access_token' + 'id_token' JSON.
     """
     token_url = "https://oauth2.googleapis.com/token"
     data = {
@@ -64,16 +61,14 @@ def exchange_code_for_token(code: str) -> dict:
         "grant_type":    "authorization_code",
     }
     resp = requests.post(token_url, data=data)
-    # If something is wrong (e.g. redirect URI mismatch), resp.status_code != 200, 
-    # so .raise_for_status() will throw an HTTPError with details.
     resp.raise_for_status()
     return resp.json()
 
 
-def verify_token(id_token_str: str) -> dict:
+def verify_id_token(id_token_str: str) -> dict:
     """
-    Verify the OAuth2 ID token (JWT) and return the userinfo dictionary. 
-    On failure, returns None.
+    Verify the ID token (JWT) and return the userinfo dictionary (email, sub, name, etc.).
+    Returns None if invalid/expired.
     """
     try:
         idinfo = id_token.verify_oauth2_token(
@@ -92,7 +87,7 @@ def verify_token(id_token_str: str) -> dict:
 
 def init_schema_if_missing(conn: sqlite3.Connection):
     """
-    Create the 'expenses' table in this user's DB file if it doesn't exist.
+    Create the 'expenses' table in this user's SQLite file if it doesn't exist.
     """
     cursor = conn.cursor()
     cursor.execute("""
@@ -111,7 +106,7 @@ def init_schema_if_missing(conn: sqlite3.Connection):
 def get_connection_for_email(email: str) -> sqlite3.Connection:
     """
     Returns a sqlite3.Connection for this user’s file.
-    We sanitize the email (replace @ → _at_, . → _), so the filename is safe.
+    We sanitize the email (replace @ → _at_, . → _) so the filename is safe.
     """
     safe_fn = email.replace("@", "_at_").replace(".", "_")
     db_path = os.path.join(USER_DB_FOLDER, f"{safe_fn}.db")
@@ -152,55 +147,54 @@ def get_expenses_df(email: str) -> pd.DataFrame:
 st.set_page_config(page_title="Expense Tracker", layout="centered")
 st.title("📊 Google‐Authenticated Expense Tracker")
 
-# ─ 4a) Has Google already redirected back with ?code=… ?
-query_params = st.experimental_get_query_params()
+
+# ─ 4a) Has Google already redirected back with "?code=XYZ" ?
+query_params = st.query_params  # ← new: use st.query_params instead of experimental_get_query_params()
 if "code" in query_params:
+    # Google sent us '?code=XYZ' after the user consented.
     code = query_params["code"][0]
     try:
         token_data = exchange_code_for_token(code)
-        # In authorization‐code flow, Google’s response JSON includes:
-        # {
-        #   "access_token":  "ya29.a0Af…",
-        #   "expires_in":    3599,
-        #   "refresh_token": "1//0g…",      # only on first consent
-        #   "scope":         "openid email profile",
-        #   "token_type":    "Bearer",
-        #   "id_token":      "<JWT here>"
-        # }
-        #
-        # We need the id_token (JWT) to verify the user’s identity (it contains email, sub, etc).
+        # token_data contains 'access_token', 'expires_in', 'id_token', etc.
         id_token_str = token_data.get("id_token")
-        user_info = verify_token(id_token_str)
+        user_info = verify_id_token(id_token_str)
         if user_info is None:
-            st.error("❌ Failed to verify ID token. Please try logging in again.")
+            st.error("❌ Failed to verify ID token. Please log in again.")
             st.stop()
 
-        # Now we have a verified user. Store their email (and entire user_info) in session_state.
+        # Store the verified email in session_state, so we know who’s logged in:
         st.session_state["google_email"]     = user_info.get("email")
         st.session_state["google_user_info"] = user_info
 
-        # Clear the code from the URL so it doesn't loop
-        st.experimental_set_query_params()
-        st.experimental_rerun()
+        # NOW: clear out the URL parameters and rerun so we don’t keep re‐exchanging the same code:
+        st.query_params = {}  # ← new: replace experimental_set_query_params({})
+        st.rerun()            # ← new: replace experimental_rerun()
 
     except requests.HTTPError as e:
-        # If Google returned a non‐200 (e.g. 403 redirect_uri_mismatch), show the JSON error:
-        err_json = e.response.json() if e.response is not None else str(e)
+        # If Google returns a 400/403, inspect the JSON to see exactly what's wrong.
+        err_json = e.response.json() if (hasattr(e, "response") and e.response is not None) else str(e)
         st.error(f"Google token exchange failed: {err_json}")
         st.stop()
 
-# ─ 4b) If we do not yet have "google_email" in session_state, show Login button
+
+# ─ 4b) If we do not yet have a logged‐in user, show the “Login with Google” link
 if "google_email" not in st.session_state:
     st.markdown("## Please sign in with Google to continue")
     login_url = build_google_auth_url()
-    st.markdown(f"<a href='{login_url}'><button style='padding:10px 20px; font-size:16px;'>🔒 Login with Google</button></a>",
-                unsafe_allow_html=True)
+    # Render a big button that sends the user to Google’s consent screen:
+    st.markdown(
+        f"<a href='{login_url}'><button "
+        "style='padding:10px 20px; font-size:16px;'>🔒 Login with Google</button></a>",
+        unsafe_allow_html=True
+    )
     st.stop()
 
-# ─ 4c) We now have a logged‐in user
+
+# ─ 4c) At this point, the user is fully authenticated (session_state["google_email"] exists)
 user_email = st.session_state["google_email"]
 user_name  = st.session_state["google_user_info"].get("name", "")
 st.success(f"✔️ Logged in as: {user_email}")
+
 
 # ───────────────────────────────────────────────────────────────────
 # 5) SIDEBAR: SUMMARY + LOGOUT
@@ -224,11 +218,11 @@ with st.sidebar:
 
     st.markdown("---")
     if st.button("🚪 Logout"):
-        # Clear session_state and rerun
+        # Clear session_state so user has to log in again
         for key in ["google_email", "google_user_info"]:
             if key in st.session_state:
                 del st.session_state[key]
-        st.experimental_rerun()
+        st.rerun()
 
 
 # ───────────────────────────────────────────────────────────────────
@@ -249,22 +243,22 @@ with tabs[0]:
     else:
         df_dash["date"] = pd.to_datetime(df_dash["date"])
 
-        # 1) Smart Suggestions
-        total    = df_dash["amount"].sum()
-        necessary   = df_dash[df_dash["is_necessary"] == 1]["amount"].sum()
-        non_need    = total - necessary
-        ratio       = non_need / total if total > 0 else 0.0
+        # (1) Smart Suggestions
+        total      = df_dash["amount"].sum()
+        necessary  = df_dash[df_dash["is_necessary"] == 1]["amount"].sum()
+        non_need   = total - necessary
+        ratio      = non_need / total if total > 0 else 0.0
 
         if ratio > 0.4:
-            st.warning("💡 You are spending over 40% on non‐necessary expenses. Consider reviewing luxuries.")
+            st.warning("💡 You are spending over 40% on non‐necessary expenses.")
         avg_monthly = df_dash.groupby(df_dash["date"].dt.to_period("M"))["amount"].sum().mean()
         if avg_monthly > 0 and ratio > 0.3:
             est_saves = ratio * avg_monthly * 0.25
-            st.success(f"Tip: You could save around {format_currency(est_saves, 'INR', locale='en_IN')} per month by reducing luxuries.")
+            st.success(f"Tip: You could save around {format_currency(est_saves, 'INR', locale='en_IN')} per month by cutting luxuries.")
 
         st.markdown("---")
 
-        # 2) Key Metrics
+        # (2) Key Metrics
         total_spent = total
         avg_spent   = df_dash["amount"].mean()
         max_spent   = df_dash["amount"].max()
@@ -280,7 +274,7 @@ with tabs[0]:
 
         st.markdown("---")
 
-        # 3) Category‐Wise Pie Chart
+        # (3) Category‐Wise Pie Chart
         cat_data = df_dash.groupby("category")["amount"].sum().reset_index()
         cat_data["formatted"] = cat_data["amount"].apply(lambda x: format_currency(x, "INR", locale="en_IN"))
 
@@ -299,7 +293,7 @@ with tabs[0]:
 
         st.markdown("---")
 
-        # 4) Necessary vs Non‐Necessary Donut
+        # (4) Necessary vs Non‐Necessary Donut
         necessity_data = df_dash.groupby("is_necessary")["amount"].sum().reset_index()
         necessity_data["label"] = necessity_data["is_necessary"].map({1: "Necessary", 0: "Non‐Necessary"})
 
@@ -317,7 +311,7 @@ with tabs[0]:
 
         st.markdown("---")
 
-        # 5) Top 5 Highest Expenses
+        # (5) Top 5 Highest Expenses
         st.markdown("### Top 5 Highest Expenses")
         top5 = df_dash.sort_values("amount", ascending=False).head(5)
         st.dataframe(top5[["amount", "category", "date", "description"]])
@@ -353,7 +347,7 @@ with tabs[2]:
     df_rep = get_expenses_df(user_email)
 
     if df_rep.empty:
-        st.info("No data yet. Go to ‘Add Expense’ to record spending.")
+        st.info("No data yet. Go to ‘Add Expense’ to record some spending.")
     else:
         df_rep["date"]   = pd.to_datetime(df_rep["date"])
         df_rep["Month"]  = df_rep["date"].dt.strftime("%B %Y")
@@ -382,7 +376,7 @@ with tabs[2]:
 
         st.markdown("---")
 
-        # c) Category Distribution per Month (Bar Chart)
+        # c) Spending per Category Over Time (Bar Chart)
         st.markdown("### Spending per Category Over Time")
         monthly_cat = df_rep.groupby([df_rep["date"].dt.to_period("M"), "category"])["amount"].sum().reset_index()
         monthly_cat["Month"] = monthly_cat["date"].dt.to_timestamp()
@@ -427,7 +421,7 @@ with tabs[2]:
 
         st.markdown("---")
 
-        # e) Average Monthly Expense Trend (Line Chart)
+        # e) Average Monthly Expense Over Time (Line Chart)
         st.markdown("### Average Monthly Expense Over Time")
         monthly_avg = df_rep.groupby(df_rep["date"].dt.to_period("M"))["amount"].mean().reset_index()
         monthly_avg["month_str"] = monthly_avg["date"].dt.strftime("%b %Y")
