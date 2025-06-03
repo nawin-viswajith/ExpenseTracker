@@ -9,11 +9,11 @@ from hashlib import sha256
 from urllib.parse import urlencode
 
 # ─────────────── OAuth / Per‐User DB Setup ───────────────
-GOOGLE_CLIENT_ID     = "YOUR_GOOGLE_CLIENT_ID"
-GOOGLE_CLIENT_SECRET = "YOUR_GOOGLE_CLIENT_SECRET"
-REDIRECT_URI         = "http://localhost:8501/"
+GOOGLE_CLIENT_ID     = st.secrets["client_id"]
+GOOGLE_CLIENT_SECRET = st.secrets["client_secret"]
+REDIRECT_URI         = st.secrets["redirect_uri"]
 
-USER_DB_FOLDER = "user_data"
+USER_DB_FOLDER = "expense_user_data"
 os.makedirs(USER_DB_FOLDER, exist_ok=True)
 
 def build_google_auth_url() -> str:
