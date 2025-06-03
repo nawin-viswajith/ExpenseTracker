@@ -8,12 +8,12 @@ from datetime import datetime
 from hashlib import sha256
 from urllib.parse import urlencode
 
-# ───────── OAuth / Per‐User DB Setup ──────────
-GOOGLE_CLIENT_ID     = st.secrets["client_id"]
-GOOGLE_CLIENT_SECRET = st.secrets["client_secret"]
-REDIRECT_URI         = st.secrets["redirect_uri"]
+# ─────────────── OAuth / Per‐User DB Setup ───────────────
+GOOGLE_CLIENT_ID     = "YOUR_GOOGLE_CLIENT_ID"
+GOOGLE_CLIENT_SECRET = "YOUR_GOOGLE_CLIENT_SECRET"
+REDIRECT_URI         = "http://localhost:8501/"
 
-USER_DB_FOLDER = "expense_user_data"
+USER_DB_FOLDER = "user_data"
 os.makedirs(USER_DB_FOLDER, exist_ok=True)
 
 def build_google_auth_url() -> str:
@@ -125,7 +125,7 @@ if "google_user_info" not in st.session_state:
     st.session_state.google_user_info = {}
 
 # 1) Check for OAuth 'code' from Google
-query_params = st.experimental_get_query_params()
+query_params = st.query_params()
 if "code" in query_params:
     code = query_params["code"][0]
     try:
