@@ -125,7 +125,7 @@ if "google_user_info" not in st.session_state:
     st.session_state.google_user_info = {}
 
 # 1) Check for OAuth 'code' from Google
-query_params = st.query_params()
+query_params = st.experimental_get_query_params()
 if "code" in query_params:
     code = query_params["code"][0]
     try:
